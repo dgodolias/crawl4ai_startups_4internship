@@ -13,3 +13,16 @@ class Venue(BaseModel):
     rating: float
     reviews: int
     description: str
+
+
+class Startup(BaseModel):
+    """
+    Represents the data structure of a Startup from F6S.
+    """
+    
+    name: str
+    website: str
+    email: str = ""
+    description: str = ""
+    location: str = ""
+    industry: str = ""
