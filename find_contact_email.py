@@ -12,8 +12,8 @@ from crawl4ai import (
 )
 
 from config import (
-    PAYHAWK_BASE_URL, 
-    PAYHAWK_CSS_SELECTOR, 
+    PAYHAWK_BASE_URL as BASE_URL, 
+    PAYHAWK_CSS_SELECTOR as CSS_SELECTOR, 
     CONTACT_KEYWORDS,
     OPENROUTER_API_KEY,
     OPENROUTER_MODEL
@@ -33,9 +33,9 @@ def get_browser_config() -> BrowserConfig:
 def get_llm_strategy() -> LLMExtractionStrategy:
     """Returns the LLM extraction strategy configuration."""
     return LLMExtractionStrategy(
-        provider="openrouter",  # Changed from DeepSeek model to OpenRouter provider
+        provider="openrouter",
         api_token=OPENROUTER_API_KEY,
-        model=OPENROUTER_MODEL,  # Specify the model separately when using OpenRouter
+        model=OPENROUTER_MODEL,
         extraction_type="custom",
         instruction=(
             "Extract all email addresses from the content that appear to be contact emails. "
@@ -65,7 +65,6 @@ async def extract_links_from_page(crawler: AsyncWebCrawler, url: str, session_id
     links = []
     if result.success:
         # Use a simple regex to extract links and their text from HTML
-        # This is basic and might not catch all links - consider using a proper HTML parser for production
         link_pattern = re.compile(r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"(?:\s+[^>]*?)?>([^<]*)<\/a>', re.IGNORECASE)
         matches = link_pattern.findall(result.cleaned_html)
         
@@ -75,7 +74,7 @@ async def extract_links_from_page(crawler: AsyncWebCrawler, url: str, session_id
             if any(keyword.lower() in text.lower() or keyword.lower() in href.lower() for keyword in CONTACT_KEYWORDS):
                 # Convert relative URLs to absolute
                 if href.startswith('/'):
-                    href = PAYHAWK_BASE_URL.rstrip('/') + href
+                    href = BASE_URL.rstrip('/') + href
                 
                 links.append({"text": text, "url": href})
     
@@ -132,17 +131,22 @@ async def crawl_for_contact_email():
     """Main function to crawl the website for contact email."""
     browser_config = get_browser_config()
     llm_strategy = get_llm_strategy()
-    session_id = "payhawk_contact_email_crawl"
+    session_id = "email_finder_session"
     
     visited_urls = set()
     found_emails = set()
     
+    # Extract website domain for output filename
+    domain = re.search(r'https?://(?:www\.)?([^/]+)', BASE_URL)
+    domain_name = domain.group(1).replace('.', '_') if domain else "website"
+    output_file = f"{domain_name}_contact_info.csv"
+    
     async with AsyncWebCrawler(config=browser_config) as crawler:
         # First, check the main page
-        print(f"Checking main page: {PAYHAWK_BASE_URL}")
-        main_page_emails = await scan_page_for_emails(crawler, PAYHAWK_BASE_URL, session_id, llm_strategy)
+        print(f"Checking main page: {BASE_URL}")
+        main_page_emails = await scan_page_for_emails(crawler, BASE_URL, session_id, llm_strategy)
         found_emails.update(main_page_emails)
-        visited_urls.add(PAYHAWK_BASE_URL)
+        visited_urls.add(BASE_URL)
         
         if main_page_emails:
             print(f"Found emails on main page: {main_page_emails}")
@@ -150,7 +154,7 @@ async def crawl_for_contact_email():
             print("No emails found on main page. Looking for contact links...")
         
         # Extract and follow potentially useful links
-        links_to_check = await extract_links_from_page(crawler, PAYHAWK_BASE_URL, session_id)
+        links_to_check = await extract_links_from_page(crawler, BASE_URL, session_id)
         print(f"Found {len(links_to_check)} potential contact links to check")
         
         for link_data in links_to_check:
@@ -172,10 +176,6 @@ async def crawl_for_contact_email():
             if link_emails:
                 print(f"Found emails on page '{link_text}': {link_emails}")
                 found_emails.update(link_emails)
-            
-            # If we've found emails, we can stop
-            if found_emails:
-                break
     
     # Display results
     if found_emails:
@@ -184,12 +184,12 @@ async def crawl_for_contact_email():
             print(f"- {email}")
         
         # Save to CSV file
-        with open("payhawk_contact_info.csv", "w") as f:
+        with open(output_file, "w") as f:
             f.write("email\n")
             for email in found_emails:
                 f.write(f"{email}\n")
         
-        print(f"\nSaved {len(found_emails)} email(s) to 'payhawk_contact_info.csv'")
+        print(f"\nSaved {len(found_emails)} email(s) to '{output_file}'")
     else:
         print("\nNo contact emails found. Try adjusting the search parameters or manually inspect the website.")
 
