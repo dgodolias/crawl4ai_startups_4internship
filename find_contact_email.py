@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import sys
+import csv
 import requests
 from typing import List, Set, Dict, Any, Optional, Tuple
 import urllib.parse
@@ -56,29 +57,41 @@ def extract_emails_from_text(text: str) -> List[str]:
         return []
     return re.findall(EMAIL_REGEX, text)
 
-def get_company_website_from_seedtable(company_id: str) -> Optional[str]:
+def get_company_info_from_seedtable(company_id: str) -> Dict[str, Any]:
     """
-    Extract the company's website URL from a SeedTable page using BeautifulSoup.
+    Extract company information from a SeedTable page using BeautifulSoup.
     
     Args:
         company_id: The company ID/slug in SeedTable URL 
         
     Returns:
-        The company's website URL if found, otherwise None
+        Dictionary with company information including name, website(s), and social accounts
     """
+    company_info = {
+        "name": company_id.split('-')[0] if '-' in company_id else company_id,
+        "websites": [],
+        "linkedin": None,
+        "emails": []
+    }
+    
+    # Clean up company name by removing special characters and URL encodings
+    company_info["name"] = re.sub(r'_+', ' ', company_info["name"])
+    company_info["name"] = re.sub(r'%[0-9A-Fa-f]{2}', '', company_info["name"])
+    company_info["name"] = company_info["name"].strip()
+    
     seedtable_url = f"{SEEDTABLE_BASE_URL}{company_id}"
-    print(f"Fetching company website from: {seedtable_url}")
+    print(f"Fetching company info from: {seedtable_url}")
     
     try:
         response = requests.get(seedtable_url)
         if response.status_code != 200:
             print(f"Failed to access SeedTable page: {seedtable_url}")
-            return None
+            return company_info
         
         # Parse the HTML with BeautifulSoup
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # APPROACH 1: Look for website links in the structured format (with "Websites:" label)
+        # Look for website links - first find the "Websites:" label then get the links
         websites_section = soup.find('span', string='Websites:')
         if websites_section:
             # Find the parent li element that contains the websites list
@@ -87,82 +100,87 @@ def get_company_website_from_seedtable(company_id: str) -> Optional[str]:
                 # Find the ul element inside that contains the website links
                 websites_ul = parent_li.find('ul', class_='flex-1')
                 if websites_ul:
-                    # Get the first website link
-                    first_link = websites_ul.find('a')
-                    if first_link and 'href' in first_link.attrs:
-                        website_url = first_link['href']
-                        print(f"Found company website (from Websites section): {website_url}")
-                        return website_url
+                    # Get all website links
+                    website_links = websites_ul.find_all('a')
+                    for link in website_links:
+                        if 'href' in link.attrs:
+                            website_url = link['href']
+                            company_info["websites"].append(website_url)
+                    
+                    if company_info["websites"]:
+                        print(f"Found company websites: {company_info['websites']}")
         
-        # APPROACH 2: Look for any social links (LinkedIn, Twitter, etc.)
+        # Look for social links to find LinkedIn
         social_links_section = soup.find('span', string='Social accounts:')
         if social_links_section:
             parent_li = social_links_section.find_parent('li')
             if parent_li:
                 linkedin_link = parent_li.find('a', href=lambda href: href and 'linkedin.com' in href)
                 if linkedin_link:
-                    # We found a LinkedIn link, extract company name from it
-                    linkedin_url = linkedin_link['href']
-                    print(f"Found LinkedIn URL: {linkedin_url}")
-                    
-                    # Try to extract company name and construct website URL
-                    company_path = linkedin_url.split('linkedin.com/company/')[-1].split('/')[0].strip()
-                    if company_path:
-                        # Remove common suffixes like -inc, -gmbh, etc.
-                        company_name = re.sub(r'-(inc|gmbh|llc|ltd|ab|co|group)$', '', company_path)
-                        
-                        # Try common domain formats
-                        website_guesses = [
-                            f"https://{company_name}.com",
-                            f"https://www.{company_name}.com"
-                        ]
-                        
-                        # Try each guess and see if it's valid
-                        for guess in website_guesses:
-                            try:
-                                verify_resp = requests.head(guess, timeout=3)
-                                if verify_resp.status_code < 400:  # Valid website
-                                    print(f"Found company website (guessed from LinkedIn): {guess}")
-                                    return guess
-                            except:
-                                continue
+                    company_info["linkedin"] = linkedin_link['href']
+                    print(f"Found LinkedIn URL: {company_info['linkedin']}")
         
-        # APPROACH 3: Check if company name is directly embedded in the page somewhere
-        # Extract company name from URL or title
-        company_name = company_id.split('-')[0] if '-' in company_id else company_id
-        # Remove any encodings/special chars
-        company_name = re.sub(r'_+', '', company_name)
-        company_name = re.sub(r'%[0-9A-Fa-f]{2}', '', company_name)
-        company_name = company_name.lower()
+        # If no websites found, try to guess from LinkedIn or company name
+        if not company_info["websites"] and company_info["linkedin"]:
+            # Try to extract company name from LinkedIn URL
+            company_path = company_info["linkedin"].split('linkedin.com/company/')[-1].split('/')[0].strip()
+            if company_path:
+                # Remove common suffixes like -inc, -gmbh, etc.
+                clean_name = re.sub(r'-(inc|gmbh|llc|ltd|ab|co|group)$', '', company_path)
+                
+                # Try common domain formats
+                website_guesses = [
+                    f"https://{clean_name}.com",
+                    f"https://www.{clean_name}.com"
+                ]
+                
+                # Try each guess and see if it's valid
+                for guess in website_guesses:
+                    try:
+                        verify_resp = requests.head(guess, timeout=3)
+                        if verify_resp.status_code < 400:  # Valid website
+                            company_info["websites"].append(guess)
+                            print(f"Found company website (guessed from LinkedIn): {guess}")
+                            break
+                    except:
+                        continue
         
-        # Try common domain formats
-        website_guesses = [
-            f"https://{company_name}.com",
-            f"https://www.{company_name}.com",
-            f"https://{company_name}.io",
-            f"https://www.{company_name}.io",
-            f"https://{company_name}.co",
-            f"https://www.{company_name}.co"
-        ]
+        # If still no websites found, try to guess from company name
+        if not company_info["websites"]:
+            # Clean up the company name for URL guessing
+            clean_name = re.sub(r'[^\w]', '', company_info["name"].lower())
+            
+            # Try common domain formats
+            website_guesses = [
+                f"https://{clean_name}.com",
+                f"https://www.{clean_name}.com",
+                f"https://{clean_name}.io",
+                f"https://www.{clean_name}.io",
+                f"https://{clean_name}.co",
+                f"https://www.{clean_name}.co"
+            ]
+            
+            # Try each guess and see if it's valid
+            for guess in website_guesses:
+                try:
+                    print(f"Trying URL guess: {guess}")
+                    verify_resp = requests.head(guess, timeout=3)
+                    if verify_resp.status_code < 400:  # Valid website
+                        company_info["websites"].append(guess)
+                        print(f"Found company website (guessed from company name): {guess}")
+                        break
+                except Exception as e:
+                    print(f"Error checking {guess}: {e}")
+                    continue
         
-        # Try each guess and see if it's valid
-        for guess in website_guesses:
-            try:
-                print(f"Trying URL guess: {guess}")
-                verify_resp = requests.head(guess, timeout=3)
-                if verify_resp.status_code < 400:  # Valid website
-                    print(f"Found company website (guessed from company name): {guess}")
-                    return guess
-            except Exception as e:
-                print(f"Error checking {guess}: {e}")
-                continue
+        if not company_info["websites"]:
+            print("No company website found on SeedTable page.")
         
-        print("No company website found on SeedTable page.")
-        return None
+        return company_info
         
     except Exception as e:
-        print(f"Error fetching company website: {e}")
-        return None
+        print(f"Error fetching company info: {e}")
+        return company_info
 
 async def extract_links_from_page(crawler: AsyncWebCrawler, url: str, session_id: str) -> List[Dict[str, str]]:
     """Extract all links from the page that might lead to contact information."""
@@ -175,6 +193,8 @@ async def extract_links_from_page(crawler: AsyncWebCrawler, url: str, session_id
     )
     
     links = []
+    emails_from_mailto = []
+    
     if result.success:
         # Use a simple regex to extract links and their text from HTML
         link_pattern = re.compile(r'<a\s+(?:[^>]*?\s+)?href="([^"]*)"(?:\s+[^>]*?)?>([^<]*)<\/a>', re.IGNORECASE)
@@ -183,13 +203,13 @@ async def extract_links_from_page(crawler: AsyncWebCrawler, url: str, session_id
         # Filter for contact-related links
         for href, text in matches:
             text = text.strip()
-            # Skip mailto links for scraping as they're not valid URLs for crawling
+            # Extract emails from mailto links
             if href.startswith('mailto:'):
-                # Extract email from mailto link
                 email_match = re.search(r'mailto:([^?]+)', href)
                 if email_match:
                     email = email_match.group(1)
                     print(f"Found email in mailto link: {email}")
+                    emails_from_mailto.append(email)
                 continue
                 
             if any(keyword.lower() in text.lower() or keyword.lower() in href.lower() for keyword in CONTACT_KEYWORDS):
@@ -200,7 +220,7 @@ async def extract_links_from_page(crawler: AsyncWebCrawler, url: str, session_id
                 
                 links.append({"text": text, "url": href})
     
-    return links
+    return links, emails_from_mailto
 
 async def scan_page_for_emails(crawler: AsyncWebCrawler, url: str, session_id: str, llm_strategy: Optional[LLMExtractionStrategy] = None) -> List[str]:
     """Scan a page for email addresses using both regex and LLM extraction."""
@@ -269,85 +289,105 @@ async def crawl_for_contact_email(seedtable_company_id: Optional[str] = None, we
     session_id = "email_finder_session"
     
     visited_urls = set()
-    found_emails = set()
     
-    # First step: Determine the target website URL outside the crawler context
-    company_website = None
-    company_name = None
+    # First step: Get company information
+    company_info = None
     
     if seedtable_company_id:
-        # Extract company website from SeedTable using BeautifulSoup
-        company_website = get_company_website_from_seedtable(seedtable_company_id)
-        company_name = seedtable_company_id.split('-')[0] if '-' in seedtable_company_id else seedtable_company_id
+        # Extract company info from SeedTable using BeautifulSoup
+        company_info = get_company_info_from_seedtable(seedtable_company_id)
     elif website_url:
         # Use provided website URL directly
-        company_website = website_url
+        company_info = {
+            "name": "",
+            "websites": [website_url],
+            "linkedin": None,
+            "emails": []
+        }
         # Extract domain for company name
         domain = re.search(r'https?://(?:www\.)?([^/]+)', website_url)
-        company_name = domain.group(1) if domain else "website"
+        if domain:
+            domain_parts = domain.group(1).split('.')
+            if len(domain_parts) > 1:
+                company_info["name"] = domain_parts[0]
     else:
         print("Error: Either seedtable_company_id or website_url must be provided.")
         return
 
-    if not company_website:
+    if not company_info or not company_info["websites"]:
         print("Could not determine company website URL. Exiting.")
         return
     
     # Format output filename
-    domain_name = re.sub(r'[^\w]', '_', company_name.lower())
+    domain_name = re.sub(r'[^\w]', '_', company_info["name"].lower())
     output_file = f"{domain_name}_contact_info.csv"
     
     # Begin crawling with crawl4ai
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        # Second step: Check the main website page
-        print(f"\nChecking main company website: {company_website}")
-        main_page_emails = await scan_page_for_emails(crawler, company_website, session_id, llm_strategy)
-        found_emails.update(main_page_emails)
-        visited_urls.add(company_website)
-        
-        if main_page_emails:
-            print(f"Found emails on main page: {main_page_emails}")
-        else:
-            print("No emails found on main page. Looking for contact links...")
-        
-        # Extract and follow potentially useful links
-        links_to_check = await extract_links_from_page(crawler, company_website, session_id)
-        print(f"Found {len(links_to_check)} potential contact links to check")
-        
-        for link_data in links_to_check:
-            link_url = link_data["url"]
-            link_text = link_data["text"]
+        # Check each website in the list if multiple are available
+        for website in company_info["websites"]:
+            print(f"\nChecking company website: {website}")
+            main_page_emails = await scan_page_for_emails(crawler, website, session_id, llm_strategy)
+            company_info["emails"].extend(main_page_emails)
+            visited_urls.add(website)
             
-            # Skip invalid URLs or already visited URLs
-            if link_url in visited_urls or link_url.startswith('mailto:'):
-                continue
+            if main_page_emails:
+                print(f"Found emails on main page: {main_page_emails}")
+            else:
+                print("No emails found on main page. Looking for contact links...")
+            
+            # Extract and follow potentially useful links
+            links_to_check, mailto_emails = await extract_links_from_page(crawler, website, session_id)
+            company_info["emails"].extend(mailto_emails)  # Add emails from mailto links
+            print(f"Found {len(links_to_check)} potential contact links to check")
+            
+            for link_data in links_to_check:
+                link_url = link_data["url"]
+                link_text = link_data["text"]
                 
-            print(f"Checking link: '{link_text}' at {link_url}")
-            visited_urls.add(link_url)
-            
-            # Pause between requests
-            await asyncio.sleep(1)
-            
-            # Check the linked page for emails
-            link_emails = await scan_page_for_emails(crawler, link_url, session_id, llm_strategy)
-            
-            if link_emails:
-                print(f"Found emails on page '{link_text}': {link_emails}")
-                found_emails.update(link_emails)
+                # Skip invalid URLs or already visited URLs
+                if link_url in visited_urls or link_url.startswith('mailto:'):
+                    continue
+                    
+                print(f"Checking link: '{link_text}' at {link_url}")
+                visited_urls.add(link_url)
+                
+                # Pause between requests
+                await asyncio.sleep(1)
+                
+                # Check the linked page for emails
+                link_emails = await scan_page_for_emails(crawler, link_url, session_id, llm_strategy)
+                
+                if link_emails:
+                    print(f"Found emails on page '{link_text}': {link_emails}")
+                    company_info["emails"].extend(link_emails)
+        
+        # Remove duplicate emails
+        company_info["emails"] = list(set(company_info["emails"]))
     
     # Display results
-    if found_emails:
+    if company_info["emails"]:
         print("\nContact emails found:")
-        for email in found_emails:
+        for email in company_info["emails"]:
             print(f"- {email}")
         
-        # Save to CSV file
-        with open(output_file, "w") as f:
-            f.write("email\n")
-            for email in found_emails:
-                f.write(f"{email}\n")
+        # Save to CSV file with all company information
+        with open(output_file, "w", newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["name", "website", "linkedin", "email"])
+            
+            # Format data for CSV
+            websites_str = ",".join(company_info["websites"]) if company_info["websites"] else ""
+            emails_str = ",".join(company_info["emails"]) if company_info["emails"] else ""
+            
+            writer.writerow([
+                company_info["name"],
+                websites_str,
+                company_info["linkedin"] or "",
+                emails_str
+            ])
         
-        print(f"\nSaved {len(found_emails)} email(s) to '{output_file}'")
+        print(f"\nSaved company information to '{output_file}'")
     else:
         print("\nNo contact emails found. Try adjusting the search parameters or manually inspect the website.")
 
