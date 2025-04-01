@@ -14,18 +14,54 @@ from crawl4ai import (
     CrawlerRunConfig
 )
 
-# URL of the SeedTable page listing AI startups in Sweden
-SEEDTABLE_LIST_URL = "https://www.seedtable.com/best-ai-startups-in-sweden"
+# List of European countries to scan
+COUNTRIES = [
+    "Austria",
+    "Belgium",
+    "Croatia",
+    "Cyprus",
+    "Czech",
+    "Denmark",
+    "Estonia",
+    "Finland",
+    "France",
+    "Germany",
+    "Hungary",
+    "Ireland",
+    "Italy",
+    "Latvia",
+    "Lithuania",
+    "Netherlands",
+    "Poland",
+    "Portugal",
+    "Spain",
+    "Sweden"
+]
 
-def extract_company_links(url: str) -> List[Dict[str, str]]:
+def get_country_url(country: str) -> str:
+    """
+    Convert country name to SeedTable URL format.
+    
+    Args:
+        country: The name of the country
+        
+    Returns:
+        The SeedTable URL for AI startups in that country
+    """
+    # Convert spaces to hyphens and convert to lowercase for URL
+    country_url_part = country.lower().replace(" ", "-")
+    return f"https://www.seedtable.com/best-ai-startups-in-{country_url_part}"
+
+def extract_company_links(url: str, country: str) -> List[Dict[str, Any]]:
     """
     Extract all company links from the SeedTable list page.
     
     Args:
         url: The URL of the SeedTable list page
+        country: The country name for these companies
         
     Returns:
-        A list of dictionaries with company name and link to their SeedTable page
+        A list of dictionaries with company name, country and link to their SeedTable page
     """
     print(f"Fetching startups list from: {url}")
     
@@ -57,12 +93,13 @@ def extract_company_links(url: str) -> List[Dict[str, str]]:
                     company_url = parent_a['href']
                     company_id = company_url.split('/')[-1]  # Get the company ID from the URL
                     
-                    # Add to our list
+                    # Add to our list with country information
                     companies.append({
                         "name": company_name,
-                        "id": company_id
+                        "id": company_id,
+                        "country": country
                     })
-                    print(f"Found company: {company_name} (ID: {company_id})")
+                    print(f"Found company: {company_name} (ID: {company_id}, Country: {country})")
             else:
                 # Alternative approach: look directly for links to company profiles
                 company_links = profile.select('a[href*="/startups/"]')
@@ -77,9 +114,10 @@ def extract_company_links(url: str) -> List[Dict[str, str]]:
                         if len(company_name) > 1:  # Avoid empty or single character links
                             companies.append({
                                 "name": company_name,
-                                "id": company_id
+                                "id": company_id,
+                                "country": country
                             })
-                            print(f"Found company (alt method): {company_name} (ID: {company_id})")
+                            print(f"Found company (alt method): {company_name} (ID: {company_id}, Country: {country})")
                             # Once found, break to avoid duplicates from the same profile
                             break
         
@@ -91,20 +129,20 @@ def extract_company_links(url: str) -> List[Dict[str, str]]:
                 seen_ids.add(company["id"])
                 unique_companies.append(company)
         
-        print(f"Found {len(unique_companies)} unique companies out of {len(companies)} total links")
+        print(f"Found {len(unique_companies)} unique companies out of {len(companies)} total links in {country}")
         return unique_companies
         
     except Exception as e:
-        print(f"Error fetching companies list: {e}")
+        print(f"Error fetching companies list for {country}: {e}")
         return companies
 
-async def process_company(crawler, company_id: str, session_id: str, llm_strategy) -> Dict[str, Any]:
+async def process_company(crawler, company_data: Dict[str, Any], session_id: str, llm_strategy) -> Dict[str, Any]:
     """
     Process a single company to extract its information and contact emails.
     
     Args:
         crawler: The web crawler instance
-        company_id: The company ID from SeedTable
+        company_data: Dictionary with company ID and country
         session_id: The crawler session ID
         llm_strategy: The LLM extraction strategy
     
@@ -112,10 +150,13 @@ async def process_company(crawler, company_id: str, session_id: str, llm_strateg
         A dictionary with company information including name, website, LinkedIn URL, and emails
     """
     # Get company information from SeedTable
-    company_info = get_company_info_from_seedtable(company_id)
+    company_info = get_company_info_from_seedtable(company_data["id"])
+    
+    # Add country to company info
+    company_info["country"] = company_data["country"]
     
     if not company_info["websites"]:
-        print(f"No website found for {company_info['name']}. Skipping.")
+        print(f"No website found for {company_info['name']} ({company_info['country']}). Skipping.")
         return company_info
     
     visited_urls = set()
@@ -163,19 +204,10 @@ async def process_company(crawler, company_id: str, session_id: str, llm_strateg
     
     return company_info
 
-async def process_all_companies():
-    """Process all companies from the SeedTable list and gather their contact information."""
-    # First, get all company links from the list page
-    companies = extract_company_links(SEEDTABLE_LIST_URL)
-    
-    if not companies:
-        print("No companies found to process.")
-        return
-    
-    print(f"\nFound {len(companies)} companies to process.")
-    
+async def process_all_countries():
+    """Process AI startups across all countries."""
     # Create a CSV file to store all contact information
-    output_file = "sweden_ai_startups_contact_info.csv"
+    output_file = "european_ai_startups_contact_info.csv"
     
     # Initialize master list to collect all company data
     all_companies_data = []
@@ -185,43 +217,64 @@ async def process_all_companies():
     llm_strategy = get_llm_strategy()
     session_id = "email_finder_session"
     
+    # Process each country
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        # Process each company
-        for i, company in enumerate(companies):
-            print(f"\n[{i+1}/{len(companies)}] Processing company: {company['name']}")
+        for country in COUNTRIES:
+            country_url = get_country_url(country)
+            print(f"\n{'='*50}\nProcessing country: {country}\n{'='*50}")
             
-            try:
-                # Process the company and get its information
-                company_info = await process_company(crawler, company['id'], session_id, llm_strategy)
+            # Get companies for this country
+            country_companies = extract_company_links(country_url, country)
+            
+            if not country_companies:
+                print(f"No companies found for {country}. Moving to next country.")
+                continue
+            
+            print(f"\nFound {len(country_companies)} companies in {country} to process.")
+            
+            # Process each company in this country
+            for i, company in enumerate(country_companies):
+                print(f"\n[{country}: {i+1}/{len(country_companies)}] Processing company: {company['name']}")
                 
-                # Add to our master list
-                if company_info:
-                    all_companies_data.append(company_info)
-                    print(f"Processed {company['name']} successfully. Found {len(company_info['emails'])} email(s).")
+                try:
+                    # Process the company and get its information
+                    company_info = await process_company(crawler, company, session_id, llm_strategy)
+                    
+                    # Add to our master list
+                    if company_info:
+                        all_companies_data.append(company_info)
+                        print(f"Processed {company['name']} ({company['country']}) successfully. Found {len(company_info['emails'])} email(s).")
+                    
+                except Exception as e:
+                    print(f"Error processing {company['name']} ({company['country']}): {e}")
                 
-            except Exception as e:
-                print(f"Error processing {company['name']}: {e}")
+                # Save progress after each company (in case of script interruption)
+                save_progress_to_csv(all_companies_data, output_file)
     
-    # Save all data to the CSV file
-    with open(output_file, "w", newline='', encoding='utf-8') as f:
+    # Final save of all data
+    save_progress_to_csv(all_companies_data, output_file)
+    print(f"\nAll countries processed. Results saved to {output_file}")
+
+def save_progress_to_csv(companies_data: List[Dict[str, Any]], filename: str):
+    """Save the current progress to CSV file."""
+    with open(filename, "w", newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["name", "website", "linkedin", "email"])
+        writer.writerow(["country", "name", "website", "linkedin", "email"])
         
-        for company in all_companies_data:
+        for company in companies_data:
             websites_str = ",".join(company["websites"]) if company["websites"] else ""
             emails_str = ",".join(company["emails"]) if company["emails"] else ""
             
             writer.writerow([
+                company["country"],
                 company["name"],
                 websites_str,
                 company["linkedin"] or "",
                 emails_str
             ])
-    
-    print(f"\nAll companies processed. Results saved to {output_file}")
 
 async def main():
-    await process_all_companies()
+    await process_all_countries()
 
 if __name__ == "__main__":
     asyncio.run(main())
