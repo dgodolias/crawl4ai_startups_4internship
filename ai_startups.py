@@ -16,22 +16,7 @@ from crawl4ai import (
 
 # List of European countries to scan
 COUNTRIES = [
-    "Austria",
-    "Belgium",
-    "Croatia",
-    "Cyprus",
-    "Czech",
-    "Denmark",
-    "Estonia",
-    "Finland",
-    "France",
-    "Germany",
-    "Hungary",
-    "Ireland",
-    "Italy",
-    "Latvia",
-    "Lithuania",
-    "Netherlands",
+
     "Poland",
     "Portugal",
     "Spain",
