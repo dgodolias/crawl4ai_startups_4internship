@@ -391,6 +391,126 @@ async def crawl_for_contact_email(seedtable_company_id: Optional[str] = None, we
     else:
         print("\nNo contact emails found. Try adjusting the search parameters or manually inspect the website.")
 
+async def find_emails_for_company(website_url: str, max_retries: int = 3) -> List[str]:
+    """
+    Find emails for a company using crawl4ai with improved error handling and retry logic
+    
+    Args:
+        website_url: The website URL to process
+        max_retries: Maximum number of retry attempts on failure
+        
+    Returns:
+        List of email addresses found
+    """
+    from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig
+    import aiohttp
+    
+    # Clean and validate the URL
+    website_url = website_url.strip()
+    
+    # Check if URL has a scheme, add https if missing
+    if not website_url.startswith(('http://', 'https://')):
+        if website_url.startswith('www.'):
+            website_url = 'https://' + website_url
+        else:
+            website_url = 'https://www.' + website_url
+    
+    print(f"Processing website: {website_url}")
+    
+    # Create browser and LLM configurations
+    browser_config = get_browser_config()
+    llm_strategy = get_llm_strategy()
+    
+    # Create run configuration with optimized settings
+    run_config = CrawlerRunConfig(
+        max_pages=10,                    # Max pages to crawl for each domain
+        cache_mode=CacheMode.PREFER_CACHE,  # Prefer cached pages if available
+        follow_links=True,               # Follow internal links
+        max_depth=2,                     # Don't go too deep
+        max_total_links=10,              # Limit the total number of links to follow
+        additional_paths=[               # Paths likely to contain contact information
+            "contact", "about", "about-us", "team", "contact-us", "support",
+            "impressum", "imprint", "kontakt", "info", "reach-us"
+        ],
+        crawl_timeout=90,                # Timeout in seconds for the entire crawl
+        page_load_timeout=20,            # Timeout in seconds for individual page loads
+        respect_robots_txt=True,         # Respect robots.txt directives
+    )
+    
+    emails = set()
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                # Run the crawler on the website
+                result = await crawler.run(
+                    url=website_url,
+                    extraction_strategy=llm_strategy,
+                    run_config=run_config,
+                )
+                
+                # Check if we got any results
+                if not result.page_results:
+                    print(f"No pages were crawled for {website_url}")
+                    retry_count += 1
+                    continue
+                
+                # Process each page result
+                for page_result in result.page_results:
+                    # Extract emails from content using regex
+                    if page_result.content:
+                        found_emails = extract_emails_from_text(page_result.content)
+                        if found_emails:
+                            emails.update(found_emails)
+                    
+                    # Also check extraction results if available
+                    if page_result.extraction_result:
+                        try:
+                            extracted_data = page_result.extraction_result
+                            if isinstance(extracted_data, dict) and 'emails' in extracted_data:
+                                if isinstance(extracted_data['emails'], list):
+                                    emails.update(extracted_data['emails'])
+                        except Exception as e:
+                            print(f"Error processing extraction result: {e}")
+                
+                # Success - break out of retry loop
+                break
+                
+        except aiohttp.ClientConnectionError as e:
+            print(f"Connection error for {website_url}: {e}")
+            retry_count += 1
+            await asyncio.sleep(2 * retry_count)  # Exponential backoff
+        except asyncio.TimeoutError:
+            print(f"Timeout while processing {website_url}")
+            retry_count += 1
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"Error in crawler for {website_url}: {str(e)}")
+            retry_count += 1
+            await asyncio.sleep(1)
+    
+    # Filter out common false positives and invalid emails
+    valid_emails = []
+    for email in emails:
+        if len(email) > 4 and '@' in email and '.' in email.split('@')[1]:
+            # Skip emails that don't match typical email patterns
+            if email.endswith('.png') or email.endswith('.jpg') or email.endswith('.gif'):
+                continue
+            
+            # Skip placeholder emails
+            if 'example.com' in email or 'youremail' in email:
+                continue
+                
+            valid_emails.append(email)
+    
+    if valid_emails:
+        print(f"Found {len(valid_emails)} valid emails for {website_url}")
+    else:
+        print(f"No valid emails found for {website_url}")
+    
+    return valid_emails
+
 async def main():
     # Check if a SeedTable company ID was provided as a command-line argument
     if len(sys.argv) > 1:
