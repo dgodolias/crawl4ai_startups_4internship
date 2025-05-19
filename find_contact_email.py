@@ -10,6 +10,12 @@ import urllib.parse
 from bs4 import BeautifulSoup
 import glob
 
+# Fix console encoding for Windows
+if sys.platform == 'win32':
+    # Force UTF-8 encoding for console output
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from crawl4ai import (
     AsyncWebCrawler, 
     BrowserConfig, 
@@ -259,17 +265,27 @@ async def scan_page_for_emails(crawler: AsyncWebCrawler, url: str, session_id: s
     emails = []
     
     # First approach: Direct HTML scanning with regex
-    result = await crawler.arun(
-        url=url,
-        config=CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,
-            session_id=session_id,
-        ),
-    )
-    
-    if result.success:
-        # Extract emails from raw HTML
-        emails = extract_emails_from_text(result.cleaned_html)    # Second approach: Use LLM to extract emails if provided
+    try:
+        result = await asyncio.wait_for(
+            crawler.arun(
+                url=url,
+                config=CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    session_id=session_id,
+                ),
+            ),
+            timeout=30  # 30 second timeout to prevent hanging
+        )
+        
+        if result.success:
+            # Extract emails from raw HTML
+            emails = extract_emails_from_text(result.cleaned_html)
+    except asyncio.TimeoutError:
+        print(f"Timeout scanning page: {url}")
+        return emails
+    except Exception as e:
+        print(f"Error scanning page {url}: {e}")
+        return emails# Second approach: Use LLM to extract emails if provided
     if llm_strategy and not emails:
         try:
             # Maximum retries for LLM extraction
@@ -488,6 +504,11 @@ async def find_emails_for_company(website_url: str) -> List[str]:
     Returns:
         List of email addresses found
     """
+    # Set recursion limit to avoid crashes
+    import sys
+    old_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(3000)  # Increase from default 1000 to 3000
+    
     browser_config = get_browser_config()
     llm_strategy = get_llm_strategy()
     session_id = "email_finder_session"
@@ -523,15 +544,25 @@ async def find_emails_for_company(website_url: str) -> List[str]:
                     # Skip invalid URLs
                     if not link_url.startswith(('http://', 'https://')) or link_url.startswith('mailto:'):
                         continue
+                    
+                    # Skip if URL is the same as the main website to avoid recursion
+                    if link_url.rstrip('/') == website_url.rstrip('/'):
+                        continue
                         
                     try:
-                        # Check for emails on contact page
-                        link_emails = await scan_page_for_emails(crawler, link_url, session_id, llm_strategy)
+                        # Check for emails on contact page with a timeout
+                        link_emails = await asyncio.wait_for(
+                            scan_page_for_emails(crawler, link_url, session_id, llm_strategy),
+                            timeout=30  # 30 second timeout to avoid hanging
+                        )
                         emails.extend(link_emails)
                         checked_count += 1
                         
                         # Pause between requests
                         await asyncio.sleep(0.5)
+                    except asyncio.TimeoutError:
+                        print(f"Timeout checking link {link_url}")
+                        continue
                     except Exception as e:
                         print(f"Error checking link {link_url}: {e}")
                         continue
@@ -539,6 +570,9 @@ async def find_emails_for_company(website_url: str) -> List[str]:
                 print(f"Error processing website {website_url}: {e}")
     except Exception as e:
         print(f"Error creating crawler for {website_url}: {e}")
+    finally:
+        # Restore original recursion limit
+        sys.setrecursionlimit(old_recursion_limit)
         
     # Remove duplicates and return
     return list(set(emails))
